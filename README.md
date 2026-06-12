@@ -19,6 +19,10 @@ across faces.
 
 ## Setup
 
+uvのインストールは [ここ](https://docs.astral.sh/uv/getting-started/installation/#installation-methods)を参考にしてください．パスを通すことを忘れずに．
+
+
+
 ```bash
 uv sync
 ```
