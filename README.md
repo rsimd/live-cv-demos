@@ -17,6 +17,8 @@ OpenCV でカメラ入力と描画を行い、重いモデルは数フレーム�
 
 ## セットアップ
 
+`uv` のインストールは [公式ドキュメント](https://docs.astral.sh/uv/getting-started/installation/#installation-methods) を参照してください。インストール後は `uv` にパスが通っていることを確認してください。
+
 ```bash
 uv sync
 ```
