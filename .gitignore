@@ -1,0 +1,13 @@
+.venv/
+.serena/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Local model and demo outputs
+models/
+runs/
+*.pt
+*.onnx
+*.mp4
+*.avi
