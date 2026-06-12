@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,15 @@ EMOTION_LABELS = (
 
 EMOTION_MEAN_BGR = np.array([91.4953, 103.8827, 131.0912], dtype=np.float32)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+EMOTION_GRAPH_COLORS_BGR = (
+    (220, 220, 220),  # Neutral
+    (60, 220, 60),  # Happiness
+    (255, 120, 40),  # Sadness
+    (0, 220, 255),  # Surprise
+    (180, 90, 255),  # Fear
+    (80, 180, 180),  # Disgust
+    (60, 60, 255),  # Anger
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +71,9 @@ class DemoConfig:
     emotion_filename: str
     emotion_model_path: Path | None
     emotion_cache_dir: Path
+    emotion_graph: bool
+    emotion_graph_height: int
+    emotion_history: int
     max_faces: int
     min_face_size: int
     torch_threads: int
@@ -71,6 +84,7 @@ class EmotionPrediction:
     box: BBox
     label: str
     confidence: float
+    probabilities: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,8 +312,15 @@ class EmotionRecognizer:
             face = frame[y1:y2, x1:x2]
             if face.size == 0:
                 continue
-            label, confidence = self._predict_face(face)
-            predictions.append(EmotionPrediction(box=box, label=label, confidence=confidence))
+            label, confidence, probabilities = self._predict_face(face)
+            predictions.append(
+                EmotionPrediction(
+                    box=box,
+                    label=label,
+                    confidence=confidence,
+                    probabilities=probabilities,
+                )
+            )
         return predictions
 
     def _detect_faces(self, frame: Frame) -> list[BBox]:
@@ -314,7 +335,7 @@ class EmotionRecognizer:
         boxes.sort(key=lambda box: (box[1], box[0]))
         return boxes[: self._max_faces]
 
-    def _predict_face(self, face_bgr: Frame) -> tuple[str, float]:
+    def _predict_face(self, face_bgr: Frame) -> tuple[str, float, tuple[float, ...]]:
         tensor = preprocess_emotion_face(face_bgr).to(self._device)
         with torch.inference_mode():
             logits = self._model(tensor)
@@ -322,8 +343,9 @@ class EmotionRecognizer:
                 logits = logits[0]
             probs: Float[Tensor, "batch emotion"] = torch.softmax(logits, dim=1)
             confidence, index = torch.max(probs, dim=1)
+            probabilities = tuple(float(value) for value in probs[0].cpu().tolist())
         label = EMOTION_LABELS[int(index.item())]
-        return label, float(confidence.item())
+        return label, float(confidence.item()), probabilities
 
 
 def normalize_state_dict(state: dict[str, Any]) -> dict[str, Tensor]:
@@ -524,6 +546,31 @@ def mean_keypoint_y(
     return float(np.mean(values))
 
 
+class EmotionProbabilityHistory:
+    def __init__(self, max_samples: int) -> None:
+        self._samples: deque[tuple[float, ...]] = deque(maxlen=max_samples)
+        self.last_face_count = 0
+
+    def append(self, predictions: list[EmotionPrediction]) -> None:
+        self.last_face_count = len(predictions)
+        if not predictions:
+            self._samples.append(tuple(0.0 for _ in EMOTION_LABELS))
+            return
+
+        values = np.array([prediction.probabilities for prediction in predictions], dtype=np.float32)
+        self._samples.append(tuple(float(value) for value in values.mean(axis=0).tolist()))
+
+    @property
+    def samples(self) -> list[tuple[float, ...]]:
+        return list(self._samples)
+
+    @property
+    def latest(self) -> tuple[float, ...]:
+        if not self._samples:
+            return tuple(0.0 for _ in EMOTION_LABELS)
+        return self._samples[-1]
+
+
 def draw_pose_predictions(frame: Frame, predictions: list[PosePrediction]) -> None:
     for prediction in predictions:
         x1, y1, _, _ = prediction.box
@@ -537,6 +584,87 @@ def draw_emotion_predictions(frame: Frame, predictions: list[EmotionPrediction])
         cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
         label = f"{prediction.label} {prediction.confidence:.2f}"
         draw_label(frame, label, (x1, max(y1 - 8, 18)), color=(255, 0, 255))
+
+
+def append_emotion_graph(
+    frame: Frame,
+    history: EmotionProbabilityHistory,
+    graph_height: int,
+) -> Frame:
+    if graph_height <= 0:
+        return frame
+
+    _, frame_width = frame.shape[:2]
+    panel = np.zeros((graph_height, frame_width, 3), dtype=np.uint8)
+    panel[:] = (12, 12, 12)
+
+    left = 58
+    right = 190
+    top = 24
+    bottom = 28
+    plot_right = max(left + 1, frame_width - right)
+    plot_bottom = graph_height - bottom
+    plot_width = max(plot_right - left, 1)
+    plot_height = max(plot_bottom - top, 1)
+
+    cv2.putText(
+        panel,
+        f"Emotion probabilities  faces:{history.last_face_count}",
+        (12, 17),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        (230, 230, 230),
+        1,
+        cv2.LINE_AA,
+    )
+
+    for value in (0.0, 0.5, 1.0):
+        y = int(plot_bottom - value * plot_height)
+        cv2.line(panel, (left, y), (plot_right, y), (45, 45, 45), 1)
+        cv2.putText(
+            panel,
+            f"{value:.1f}",
+            (10, y + 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (170, 170, 170),
+            1,
+            cv2.LINE_AA,
+        )
+
+    samples = history.samples
+    if samples:
+        point_count = len(samples)
+        x_denominator = max(point_count - 1, 1)
+        for emotion_index, color in enumerate(EMOTION_GRAPH_COLORS_BGR):
+            points = []
+            for sample_index, sample in enumerate(samples):
+                x = int(left + (sample_index / x_denominator) * plot_width)
+                y = int(plot_bottom - np.clip(sample[emotion_index], 0.0, 1.0) * plot_height)
+                points.append((x, y))
+            if len(points) == 1:
+                cv2.circle(panel, points[0], 3, color, -1)
+            else:
+                cv2.polylines(panel, [np.array(points, dtype=np.int32)], False, color, 2)
+
+    legend_x = plot_right + 12
+    legend_y = top + 6
+    latest = history.latest
+    for index, (label, color) in enumerate(zip(EMOTION_LABELS, EMOTION_GRAPH_COLORS_BGR, strict=True)):
+        y = legend_y + index * 18
+        cv2.line(panel, (legend_x, y - 4), (legend_x + 18, y - 4), color, 2)
+        cv2.putText(
+            panel,
+            f"{label[:8]:<8} {latest[index]:.2f}",
+            (legend_x + 24, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.43,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    return np.vstack([frame, panel])
 
 
 def draw_status(frame: Frame, fps: float, config: DemoConfig) -> None:
@@ -604,6 +732,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pose-every", type=positive_interval, default=3)
     parser.add_argument("--segment-every", type=positive_interval, default=8)
     parser.add_argument("--emotion-every", type=positive_interval, default=5)
+    parser.add_argument("--no-emotion-graph", action="store_true", help="Hide emotion line graph.")
+    parser.add_argument("--emotion-graph-height", type=int, default=180)
+    parser.add_argument("--emotion-history", type=positive_interval, default=90)
 
     parser.add_argument("--detect-model", default="yolo11n.pt")
     parser.add_argument("--detect-fallback-model", default="yolov8n.pt")
@@ -650,6 +781,9 @@ def config_from_args(args: argparse.Namespace) -> DemoConfig:
         emotion_filename=args.emotion_filename,
         emotion_model_path=args.emotion_model_path,
         emotion_cache_dir=args.emotion_cache_dir,
+        emotion_graph=not args.no_emotion_graph,
+        emotion_graph_height=args.emotion_graph_height,
+        emotion_history=args.emotion_history,
         max_faces=args.max_faces,
         min_face_size=args.min_face_size,
         torch_threads=args.torch_threads,
@@ -713,6 +847,11 @@ def run_demo(config: DemoConfig) -> None:
         raise RuntimeError(f"Could not open camera or video source: {config.camera!r}")
 
     tracker = SimplePersonTracker()
+    emotion_history = (
+        EmotionProbabilityHistory(config.emotion_history)
+        if emotion_recognizer is not None and config.emotion_graph
+        else None
+    )
     last_detect = None
     last_pose = None
     last_segment = None
@@ -740,6 +879,8 @@ def run_demo(config: DemoConfig) -> None:
                 last_pose_predictions = extract_pose_predictions(last_pose, tracker, now)
             if emotion_recognizer is not None and frame_index % config.emotion_every == 0:
                 last_emotions = emotion_recognizer.predict_frame(frame)
+                if emotion_history is not None:
+                    emotion_history.append(last_emotions)
 
             display = frame.copy()
             display = plot_yolo_result(last_detect, display)
@@ -765,6 +906,8 @@ def run_demo(config: DemoConfig) -> None:
             fps = 0.9 * fps + 0.1 * (1.0 / dt) if fps else 1.0 / dt
             previous_time = now
             draw_status(display, fps, config)
+            if emotion_history is not None:
+                display = append_emotion_graph(display, emotion_history, config.emotion_graph_height)
 
             cv2.imshow("Live CV Demo", display)
             key = cv2.waitKey(1) & 0xFF

@@ -13,6 +13,10 @@ few frames so that a normal laptop CPU has a chance to keep up.
 To keep the demo readable, object detection draws boxes, pose draws keypoints and action labels
 without pose boxes, and segmentation draws masks without segmentation boxes.
 
+When emotion recognition is enabled, a real-time line graph for all seven emotion classes is shown
+below the camera view. If multiple faces are detected, the graph uses the average class probability
+across faces.
+
 ## Setup
 
 ```bash
@@ -81,6 +85,13 @@ Use a different local YOLO cache directory:
 
 ```bash
 uv run live-cv-demo --yolo-cache-dir /path/to/yolo-weights
+```
+
+Adjust or hide the emotion graph:
+
+```bash
+uv run live-cv-demo --emotion-graph-height 140 --emotion-history 120
+uv run live-cv-demo --no-emotion-graph
 ```
 
 ## Air Drawing Demo
